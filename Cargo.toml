@@ -9,4 +9,7 @@ itertools = "0.13.0"
 nostr = "0.34.1"
 nostr-sdk = { version = "0.34.0", features = ["ndb"] }
 petgraph = "0.6.5"
+regex = "1.11.0"
+serde = "1.0.210"
 tokio = "1.40.0"
+toml = "0.8.19"
