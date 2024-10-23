@@ -28,6 +28,10 @@ pub async fn build_client(keys: impl Into<NostrSigner>) -> Client {
         .add_relay("wss://nos.lol")
         .await
         .expect("Relay parse error");
+    client
+        .add_relay("wss://strfry.iris.to")
+        .await
+        .expect("Relay parse error");
     // client.add_relay("wss://purplepag.es").await?;
     // client
     //     .add_relay("wss://lnbits.aruku.kro.kr/nostrrelay/private")
@@ -37,6 +41,79 @@ pub async fn build_client(keys: impl Into<NostrSigner>) -> Client {
     client.connect().await;
 
     client
+}
+
+pub async fn listen_mentions(
+    client: &Client,
+    pubkey: PublicKey,
+    timeout: Option<Duration>,
+) -> Result<impl Iterator<Item = Event>, Error> {
+    let filter_mention = Filter::new().pubkey(pubkey).kind(Kind::TextNote);
+    let mention_mark = "nostr:".to_string() + &pubkey.to_bech32().unwrap();
+    let events = client
+        .get_events_of(vec![filter_mention], EventSource::relays(timeout))
+        .await?;
+
+    // Filter events that mention the pubkey directly
+    let events = events
+        .into_iter()
+        .filter(move |event| event.content.contains(&mention_mark));
+
+    Ok(events)
+}
+
+use regex::Regex;
+pub fn find_pubkeys_in_message(content: &str) -> Vec<PublicKey> {
+    let pubkey_regex: Regex = Regex::new(r"nostr:npub[a-zA-Z0-9]*").unwrap();
+    pubkey_regex
+        .find_iter(content)
+        .filter_map(|x| PublicKey::from_nostr_uri(x.as_str()).ok())
+        .collect_vec()
+}
+
+/// Get the old event tags and build the tags of reply
+pub fn map_event_tags_to_reply(event: &Event) -> Vec<Tag> {
+    if event
+        .tags
+        .iter()
+        .all(|tag| !(tag.is_root() || tag.is_reply()))
+    {
+        // Event doesn't reference other events
+        let event_ref = Tag::custom(
+            TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::E)),
+            [&event.id.to_hex(), "", "root"],
+        );
+        let author_ref = Tag::public_key(event.pubkey);
+        let mut to_return = vec![event_ref, author_ref];
+        return to_return;
+    } else {
+        let event_ref = Tag::custom(
+            TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::E)),
+            [&event.id.to_hex(), "", "reply"],
+        );
+        let author_ref = Tag::public_key(event.pubkey);
+        let mut to_return = vec![event_ref, author_ref];
+        to_return.extend(event.tags.clone().into_iter().filter_map(|x| {
+            if x.is_root()
+                || x.kind() == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::P))
+            {
+                Some(x.clone())
+            } else {
+                None
+            }
+        }));
+        return to_return;
+    }
+}
+
+pub async fn reply_to_text(
+    client: &Client,
+    event: &Event,
+    content: &str,
+) -> Result<Output<EventId>, Error> {
+    client
+        .publish_text_note(content, map_event_tags_to_reply(&event))
+        .await
 }
 
 pub async fn send_text(my_keys: &Keys, client: &Client, content: &str) -> Result<(), Error> {

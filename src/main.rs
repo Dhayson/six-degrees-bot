@@ -1,12 +1,15 @@
 use clap::ArgGroup;
+use clap::ValueHint;
 #[allow(unused)]
 use clap::{arg, command, value_parser, Arg, ArgAction, Command};
 use network::follow::FollowNetwork;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 
 mod client_utils;
+mod listen;
 mod map_intersect;
 mod network;
 mod sep_degrees;
@@ -76,17 +79,20 @@ async fn main() -> Result<()> {
                 .value_name("npub")
                 .num_args(2),
         )
+        .arg(
+            Arg::new("listen mentions")
+                .long("listen-mentions")
+                .help("Listen for events that mention the client pubkey")
+                .value_name("config path")
+                .value_hint(ValueHint::FilePath)
+                .num_args(1)
+        )
         .group(
             ArgGroup::new("Mutually exclusive")
-                .args(["run old", "print rank", "separation degrees"])
+                .args(["run old", "print rank", "separation degrees", "listen mentions"])
                 .multiple(false),
         )
         .get_matches();
-
-    let default_keys = match matches.get_one::<String>("connection key") {
-        Some(s) => Keys::parse(s),
-        None => Err(nostr_sdk::key::Error::InvalidSecretKey),
-    };
 
     if matches.get_one::<bool>("print rank") == Some(&true) {
         print_rank(
@@ -98,12 +104,76 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    let my_keys = default_keys.unwrap();
+    let my_keys = match matches
+        .get_one::<String>("connection key")
+        .map(|x| x.as_str())
+    {
+        Some("new") => {
+            let keys = Keys::generate();
+            eprintln!(
+                "generated key: {} {}",
+                keys.secret_key().unwrap().to_bech32().unwrap(),
+                keys.public_key().to_bech32().unwrap()
+            );
+            keys
+        }
+        Some(s) => Keys::parse(s).unwrap(),
+        None => Err(nostr_sdk::key::Error::InvalidSecretKey).unwrap(),
+    };
     let my_pubkey = my_keys.public_key();
     let (client, user, network) = start_connection(my_keys, my_pubkey).await;
 
     if let Some(vals) = matches.get_many::<String>("separation degrees") {
-        sep_degrees::main(vals.map(|x| x.as_str()), client, network).await;
+        sep_degrees::main(vals.map(|x| x.as_str()), &client, &network).await;
+        return Ok(());
+    }
+
+    if let Some(config_path) = matches.get_one::<String>("listen mentions") {
+        assert!(Path::new(config_path).is_file());
+        let client_clone = client.clone();
+
+        async fn second_action(
+            event: Event,
+            result: Result<(u32, Vec<PublicKey>), sep_degrees::SepDegreeError>,
+            client: Arc<Client>,
+        ) {
+            let message = match result {
+                    Ok((_, mut path)) => {
+                        let mut saudation = "Found Match\n".to_string();
+                        let last = path.pop().unwrap();
+                        for pubkey in path {
+                            saudation += &format!("nostr:{} is mutual with\n", pubkey.to_bech32().unwrap());
+                        }
+                        if saudation.is_empty() {
+                            saudation += &format!("nostr:{} is the sole one in this chain.", last.to_bech32().unwrap());
+                        }
+                        else {
+                            saudation += &format!("nostr:{} .", last.to_bech32().unwrap());
+                        }
+                        saudation
+                    },
+                    Err(err) => match err {
+                        sep_degrees::SepDegreeError::TooFewArguments => "Too few public keys in request. Use: mention me and then another 2 pubkeys.".to_string(),
+                        sep_degrees::SepDegreeError::TooMuchArguments => {
+                            "Too much public keys in request. Use: mention me and then another 2 pubkeys.".to_string()
+                        }
+                    },
+                };
+            match reply_to_text(&client, &event, &message).await {
+                Ok(ok) => println!("Sent event {}", ok.id()),
+                Err(err) => eprintln!("Reply error: {err}"),
+            };
+        }
+
+        listen::listen_mention(
+            &client,
+            user,
+            config_path,
+            |x, y| sep_degrees::from_message(x, y, 3),
+            (client.clone(), network),
+            second_action,
+        )
+        .await;
         return Ok(());
     }
 
