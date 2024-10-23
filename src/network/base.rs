@@ -18,7 +18,8 @@ pub struct Network {
     graph: DiGraph<PublicKey, EdgeKind>,
     graph_indices: HashMap<PublicKey, NodeIndex>,
     users_metadata: HashMap<PublicKey, Option<(Metadata, Timestamp)>>,
-    added_out_edges: HashMap<PublicKey, Timestamp>,
+    added_out_edges_since: HashMap<PublicKey, Timestamp>,
+    contact_list_creation: HashMap<PublicKey, Timestamp>,
     all_users: HashSet<PublicKey>,
 }
 
@@ -28,7 +29,8 @@ impl Network {
             graph: DiGraph::new(),
             graph_indices: HashMap::new(),
             users_metadata: HashMap::new(),
-            added_out_edges: HashMap::new(),
+            added_out_edges_since: HashMap::new(),
+            contact_list_creation: HashMap::new(),
             all_users: HashSet::new(),
         }
     }
@@ -63,10 +65,22 @@ impl Network {
         &mut self,
         user: PublicKey,
         contacts: impl IntoIterator<Item = &'a PublicKey>,
+        timestamp: &Timestamp,
     ) {
         let (node_user, added) = self.add_user(user);
         if !added {
-            self.remove_contact_list(user);
+            if timestamp
+                > self
+                    .contact_list_creation
+                    .get(&user)
+                    .or(Some(&Timestamp::zero()))
+                    .unwrap()
+            {
+                self.remove_contact_list(user);
+                self.contact_list_creation.insert(user, *timestamp);
+            } else {
+                return;
+            }
         }
         for follow in contacts {
             self.add_follow(user, *follow);
@@ -114,7 +128,7 @@ impl Network {
         match self.get_following_edge_nodes(user_node, follow_node) {
             Some(s) => s.id(),
             None => {
-                self.added_out_edges.insert(
+                self.added_out_edges_since.insert(
                     *self
                         .graph
                         .node_weight(user_node)
@@ -127,8 +141,12 @@ impl Network {
         }
     }
 
-    pub fn does_user_follow(&self, user: &PublicKey) -> Option<Timestamp> {
-        self.added_out_edges.get(user).copied()
+    pub fn user_follow_last_update(&self, user: &PublicKey) -> Option<Timestamp> {
+        self.added_out_edges_since.get(user).copied()
+    }
+
+    pub fn does_user_follow(&self, user: &PublicKey) -> bool {
+        self.added_out_edges_since.get(user).is_some()
     }
 
     pub fn are_users_mutuals(&self, user: &PublicKey, other: &PublicKey) -> bool {

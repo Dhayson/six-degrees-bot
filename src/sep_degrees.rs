@@ -11,11 +11,24 @@ use crate::network::Network;
 
 use nostr_sdk::prelude::*;
 
-pub async fn main(
-    vals: impl IntoIterator<Item = &str>,
-    client: Arc<Client>,
-    network: Arc<Mutex<Network>>,
-) {
+#[derive(Debug)]
+pub enum SepDegreeError {
+    TooFewArguments,
+    TooMuchArguments,
+}
+
+impl std::fmt::Display for SepDegreeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SepDegreeError::TooFewArguments => write!(f, "Too few arguments"),
+            SepDegreeError::TooMuchArguments => write!(f, "Too much arguments"),
+        }
+    }
+}
+
+impl std::error::Error for SepDegreeError {}
+
+pub async fn main(vals: impl IntoIterator<Item = &str>, client: &Client, network: &Mutex<Network>) {
     let vals = vals
         .into_iter()
         .map(|x| PublicKey::parse(x).expect("Pubkey parse error"))
@@ -40,12 +53,44 @@ pub async fn main(
     return;
 }
 
+pub async fn from_message(
+    message: Event,
+    (client, network): (Arc<Client>, Arc<Mutex<Network>>),
+    argnum: usize,
+) -> Result<(u32, Vec<PublicKey>), SepDegreeError> {
+    let vals = find_pubkeys_in_message(&message.content);
+
+    if vals.len() > argnum {
+        return Err(SepDegreeError::TooMuchArguments);
+    } else if vals.len() < argnum {
+        return Err(SepDegreeError::TooFewArguments);
+    }
+
+    let (i, j) = if argnum == 2 { (0, 1) } else { (1, 2) };
+
+    // TODO: make these panics into return results
+    let (degree, path) = find_sep_degrees(&client, &network, vals[i], vals[j], 300)
+        .await
+        .unwrap();
+
+    while !verify_path(&client, &network, path.clone()).await.unwrap() {
+        find_sep_degrees(&client, &network, vals[i], vals[j], 300)
+            .await
+            .unwrap();
+    }
+
+    Ok((degree, path))
+}
+
 pub async fn verify_path(
     client: &Client,
-    network: &Arc<Mutex<Network>>,
+    network: &Mutex<Network>,
     path: Vec<PublicKey>,
 ) -> Result<bool> {
-    eprintln!("Verifying: {:?}", path.iter().map(|x| x.to_bech32()));
+    eprintln!(
+        "Verifying: {:?}",
+        path.iter().map(|x| x.to_bech32()).collect_vec()
+    );
 
     let mut follows = client_utils::get_following_multiple_users_with_timestamp_and_timeout(
         path.clone(),
@@ -55,8 +100,8 @@ pub async fn verify_path(
     .await?;
 
     let mut net_lock = network.lock().await;
-    for (user, (contact_list, _)) in follows.iter() {
-        net_lock.update_contact_list(*user, contact_list);
+    for (user, (contact_list, time)) in follows.iter() {
+        net_lock.update_contact_list(*user, contact_list, time);
     }
 
     for (i, j) in (0..path.len()).zip(1..path.len()) {
@@ -70,7 +115,7 @@ pub async fn verify_path(
 
 pub async fn find_sep_degrees(
     client: &Client,
-    network: &Arc<Mutex<Network>>,
+    network: &Mutex<Network>,
     target_1: PublicKey,
     target_2: PublicKey,
     chunk_size: u32,
@@ -200,21 +245,26 @@ pub async fn find_sep_degrees(
         let mut next_map_i: HashMap<PublicKey, PublicKey> = HashMap::new();
         let mut new_border_i: HashSet<PublicKey> = HashSet::new();
 
-        // TODO: chunks
-        let mut now = 0;
+        // Add contact list users in border
+        let mut now = 1;
         let total = border_i.len().div_ceil(chunk_size as usize);
-        let border_chunks = border_i.chunks(chunk_size as usize);
+        let border_chunks = {
+            let mut net_lock = network.lock().await;
+            // Ignore users that already have follow in the newtwork
+            border_i
+                .iter()
+                .filter(|x| !net_lock.does_user_follow(x))
+                .chunks(chunk_size as usize)
+                .into_iter()
+                .map(|x| x.collect_vec())
+                .collect_vec()
+        };
         for chunk in border_chunks {
             eprintln!("current: {now}/{total}");
 
-            let mut net_lock = network.lock().await;
-            // Filter users that already have their followers in the network
             let chunk = {
-                chunk
-                    .iter()
-                    .filter(|x| !net_lock.does_user_follow(x).is_some())
-                    .map(|x| *x)
-                    .collect_vec()
+                // Filter users that already have their followers in the network
+                chunk.into_iter().map(|x| *x).collect_vec()
             };
 
             let mut res_contacts =
@@ -224,19 +274,23 @@ pub async fn find_sep_degrees(
                     None,
                 )
                 .await?;
+
             for user in chunk {
-                let (contacts, _) = match res_contacts.remove(&user) {
+                let mut net_lock = network.lock().await;
+                let (contacts, time) = match res_contacts.remove(&user) {
                     Some(s) => s,
                     None => {
                         eprintln!("Didn't find user {user} contact list");
                         continue;
                     }
                 };
-                net_lock.update_contact_list(user, contacts.iter());
+                net_lock.update_contact_list(user, contacts.iter(), &time);
             }
             now += 1;
         }
 
+        // Add users to next level if they follow someone from the previous one
+        // Create new border with their's contact lists
         for user in &mut *border_i {
             let mut flag_in_next_level = false;
             let mut new_border_i_user = Vec::new();
@@ -247,9 +301,13 @@ pub async fn find_sep_degrees(
                     Some(last_level) => last_level.contains_key(&follow),
                     None => false,
                 } {
-                    flag_in_next_level = true;
-                    next_map_i.insert(*user, *follow);
+                    // Make sure to only add mutuals in the next level
+                    if net_lock.are_users_mutuals(user, follow) {
+                        flag_in_next_level = true;
+                        next_map_i.insert(*user, *follow);
+                    }
                 } else {
+                    // Add newly found user
                     if !mutual_levels_i.iter().any(|x| x.contains_key(follow)) {
                         new_border_i_user.push(follow);
                     }
@@ -265,6 +323,8 @@ pub async fn find_sep_degrees(
 
         current_distance += 1;
 
+        // Avoid growing too big
+        // TODO: make it not panic!
         if current_distance == 7 {
             panic!("Too many levels")
         }
