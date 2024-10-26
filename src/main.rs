@@ -138,27 +138,34 @@ async fn main() -> Result<()> {
             client: Arc<Client>,
         ) {
             let message = match result {
-                    Ok((_, mut path)) => {
-                        let mut saudation = "Found Match\n".to_string();
-                        let last = path.pop().unwrap();
-                        for pubkey in path {
-                            saudation += &format!("nostr:{} is mutual with\n", pubkey.to_bech32().unwrap());
-                        }
-                        if saudation.is_empty() {
-                            saudation += &format!("nostr:{} is the sole one in this chain.", last.to_bech32().unwrap());
-                        }
-                        else {
-                            saudation += &format!("nostr:{} .", last.to_bech32().unwrap());
-                        }
-                        saudation
-                    },
-                    Err(err) => match err {
-                        sep_degrees::SepDegreeError::TooFewArguments => "Too few public keys in request. Use: mention me and then another 2 pubkeys.".to_string(),
-                        sep_degrees::SepDegreeError::TooMuchArguments => {
-                            "Too much public keys in request. Use: mention me and then another 2 pubkeys.".to_string()
-                        }
-                    },
-                };
+                Ok((_, mut path)) => {
+                    let mut saudation = "Found Match:\n\n".to_string();
+                    let last = path.pop().unwrap();
+                    for pubkey in path.iter() {
+                        saudation +=
+                            &format!("nostr:{} is mutual with\n", pubkey.to_bech32().unwrap());
+                    }
+                    if path.is_empty() {
+                        saudation += &format!(
+                            "nostr:{} is the sole one in this chain",
+                            last.to_bech32().unwrap()
+                        );
+                    } else {
+                        saudation += &format!("nostr:{}", last.to_bech32().unwrap());
+                    }
+                    saudation
+                }
+                Err(err) => match err {
+                    sep_degrees::SepDegreeError::TooFewArguments => {
+                        "Too few public keys in request. Use: mention me and then another 2 users."
+                            .to_string()
+                    }
+                    sep_degrees::SepDegreeError::TooMuchArguments => {
+                        "Too much public keys in request. Use: mention me and then another 2 users."
+                            .to_string()
+                    }
+                },
+            };
             match reply_to_text(&client, &event, &message).await {
                 Ok(ok) => println!("Sent event {}", ok.id()),
                 Err(err) => eprintln!("Reply error: {err}"),
