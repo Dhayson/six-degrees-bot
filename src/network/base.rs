@@ -3,6 +3,8 @@ use itertools::Itertools;
 use petgraph::visit::EdgeRef;
 use petgraph::Direction;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 use nostr_sdk::prelude::*;
 use petgraph::graph::{DiGraph, EdgeIndex, NodeIndex};
@@ -21,6 +23,7 @@ pub struct Network {
     added_out_edges_since: HashMap<PublicKey, Timestamp>,
     contact_list_creation: HashMap<PublicKey, Timestamp>,
     all_users: HashSet<PublicKey>,
+    delete_lock: Arc<RwLock<()>>,
 }
 
 impl Network {
@@ -32,7 +35,17 @@ impl Network {
             added_out_edges_since: HashMap::new(),
             contact_list_creation: HashMap::new(),
             all_users: HashSet::new(),
+            delete_lock: Arc::new(RwLock::new(())),
         }
+    }
+
+    /// Usage:
+    ///
+    /// Call read_owned to prevent deletions in the underlying network until the guard is dropped
+    ///
+    /// Call write_owned to prevent calls to read_owned until the guard is dropped and to allow deletions
+    pub fn get_delete_lock(&self) -> Arc<RwLock<()>> {
+        self.delete_lock.clone()
     }
 
     /// Returns (node, false) if user is already in the network
@@ -79,6 +92,24 @@ impl Network {
                 self.remove_contact_list(user);
                 self.contact_list_creation.insert(user, *timestamp);
             } else {
+                return;
+            }
+        }
+        for follow in contacts {
+            self.add_follow(user, *follow);
+        }
+    }
+
+    /// Add contact list of user, but doesn't replace an old one
+    pub fn add_contact_list<'a>(
+        &mut self,
+        user: PublicKey,
+        contacts: impl IntoIterator<Item = &'a PublicKey>,
+        timestamp: &Timestamp,
+    ) {
+        let (node_user, added) = self.add_user(user);
+        if !added {
+            if let Some(_time) = self.contact_list_creation.get(&user) {
                 return;
             }
         }

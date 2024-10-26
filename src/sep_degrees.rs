@@ -95,11 +95,6 @@ pub async fn verify_path(
     network: &Mutex<Network>,
     path: Vec<PublicKey>,
 ) -> Result<bool, SepDegreeError> {
-    eprintln!(
-        "Verifying: {:?}",
-        path.iter().map(|x| x.to_bech32()).collect_vec()
-    );
-
     let mut follows = match client_utils::get_following_multiple_users_with_timestamp_and_timeout(
         path.clone(),
         &client,
@@ -110,6 +105,18 @@ pub async fn verify_path(
         Ok(ok) => ok,
         Err(err) => return Err(SepDegreeError::NostrClientError(err)),
     };
+
+    let _allow_del_lock = {
+        let lock = network.lock().await;
+        lock.get_delete_lock()
+    }
+    .write_owned()
+    .await;
+
+    eprintln!(
+        "Verifying: {:?}",
+        path.iter().map(|x| x.to_bech32()).collect_vec()
+    );
 
     let mut net_lock = network.lock().await;
     for (user, (contact_list, time)) in follows.iter() {
@@ -132,6 +139,13 @@ pub async fn find_sep_degrees(
     target_2: PublicKey,
     chunk_size: u32,
 ) -> Result<(u32, Vec<PublicKey>), SepDegreeError> {
+    let _prevent_del_lock = {
+        let lock = network.lock().await;
+        lock.get_delete_lock()
+    }
+    .read_owned()
+    .await;
+
     // Add targets to network, if they aren't already
     {
         let mut net_lock = network.lock().await;
@@ -287,7 +301,7 @@ pub async fn find_sep_degrees(
                         continue;
                     }
                 };
-                net_lock.update_contact_list(user, contacts.iter(), &time);
+                net_lock.add_contact_list(user, contacts.iter(), &time);
             }
             now += 1;
         }
