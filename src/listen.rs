@@ -30,6 +30,7 @@ struct Responded(HashSet<EventId>);
 #[derive(Debug, Serialize, Deserialize)]
 struct Config {
     responded: Responded,
+    wait_time_secs: u64,
 }
 
 pub async fn listen_mention<T1, T2, S, F>(
@@ -57,24 +58,40 @@ pub async fn listen_mention<T1, T2, S, F>(
             eprintln!("Config file missing: {}", err);
             let config = Config {
                 responded: Responded(HashSet::new()),
+                wait_time_secs: 100,
             };
             fs::write(config_path, toml::to_string(&config).unwrap()).unwrap();
             config
         }
     };
     let config = Arc::new(Mutex::new(config));
-
-    let mut delay = interval(Duration::from_secs(10));
+    let wait_time = config.lock().await.wait_time_secs;
+    let mut delay = interval(Duration::from_secs(wait_time));
     loop {
         delay.tick().await;
         // Listen for mentions
+        println!("Looking for new mentions");
         let mentions = {
             let config_lock = config.lock().await;
-            listen_mentions(&client, user.public_key(), None)
-                .await
-                .unwrap()
-                .filter(|event| !config_lock.responded.0.contains(&event.id))
-                .collect_vec()
+            match listen_mentions(&client, user.public_key(), None).await {
+                Ok(ok) => ok,
+                Err(mut err) => {
+                    let val;
+                    loop {
+                        eprintln!("Listen mentions error: {}", err);
+                        let res = listen_mentions(&client, user.public_key(), None).await;
+                        if let Ok(ok) = res {
+                            val = ok;
+                            break;
+                        } else if let Err(err2) = res {
+                            err = err2;
+                        }
+                    }
+                    val
+                }
+            }
+            .filter(|event| !config_lock.responded.0.contains(&event.id))
+            .collect_vec()
         };
 
         let mut tasks = vec![];
@@ -115,20 +132,22 @@ pub async fn listen_mention<T1, T2, S, F>(
             tasks.push(tokio::task::spawn(block(
                 client.clone(),
                 config.clone(),
-                mention.clone(),
+                mention,
                 config_path.to_string(),
                 action.clone(),
                 action_args.clone(),
                 second_action.clone(),
             )));
-            // println!("timestamp: {}", mention.created_at);
-            // println!("tags: {:?}", mention.tags);
-            // println!("id: {}", mention.id);
-            // println!("content: {}", mention.content);
-            // println!(":endcontent");
-            // println!();
         }
-        let res = join_all(tasks).await;
-        std::process::exit(123);
+        let tasks_len = tasks.len();
+        if tasks_len == 0 {
+            println!("No new mention found. Waiting {} seconds", wait_time);
+        }
+        for val in join_all(tasks).await {
+            match val {
+                Ok(()) => (),
+                Err(err) => eprintln!("JoinError: {}", err),
+            }
+        }
     }
 }
