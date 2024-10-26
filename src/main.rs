@@ -139,7 +139,7 @@ async fn main() -> Result<()> {
         ) {
             let message = match result {
                 Ok((_, mut path)) => {
-                    let mut saudation = "Found Match:\n\n".to_string();
+                    let mut saudation = "Found Connection:\n\n".to_string();
                     let last = path.pop().unwrap();
                     for pubkey in path.iter() {
                         saudation +=
@@ -157,13 +157,23 @@ async fn main() -> Result<()> {
                 }
                 Err(err) => match err {
                     sep_degrees::SepDegreeError::TooFewArguments => {
-                        "Too few public keys in request. Use: mention me and then another 2 users."
+                        "Too few public keys in request. Use: mention me and then another 2 users!"
                             .to_string()
                     }
                     sep_degrees::SepDegreeError::TooMuchArguments => {
-                        "Too much public keys in request. Use: mention me and then another 2 users."
+                        "Too much public keys in request. Use: mention me and then another 2 users!"
                             .to_string()
                     }
+                    sep_degrees::SepDegreeError::NostrClientError(_error) => {
+                        "Nostr client internal error".to_string()
+                    }
+                    sep_degrees::SepDegreeError::NotFound => {
+                        "Connection between users not found".to_string()
+                    }
+                    sep_degrees::SepDegreeError::MissingContactList(public_key) => format!(
+                        "Missing contact list of nostr:{}",
+                        public_key.to_bech32().unwrap()
+                    ),
                 },
             };
             match reply_to_text(&client, &event, &message).await {
