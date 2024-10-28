@@ -33,6 +33,11 @@ struct Config {
     wait_time_secs: u64,
 }
 
+/// Listen for mentions to the key configured in user
+///
+/// action: Processing of the collected event
+///
+/// second_action: Action with the result of action, e.g. send a reply
 pub async fn listen_mention<T1, T2, S, F>(
     client: &Arc<Client>,
     user: User,

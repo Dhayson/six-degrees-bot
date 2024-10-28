@@ -65,26 +65,16 @@ pub async fn main(vals: impl IntoIterator<Item = &str>, client: &Client, network
     return;
 }
 
-pub async fn from_message(
-    message: Event,
-    (client, network): (Arc<Client>, Arc<Mutex<Network>>),
-    argnum: usize,
+pub async fn from_pubkeys(
+    pubkey: PublicKey,
+    other: PublicKey,
+    client: &Client,
+    network: &Arc<Mutex<Network>>,
 ) -> Result<(u32, Vec<PublicKey>), SepDegreeError> {
-    let vals = find_pubkeys_in_message(&message.content);
+    let (degree, path) = find_sep_degrees(&client, network, pubkey, other, 300).await?;
 
-    if vals.len() > argnum {
-        return Err(SepDegreeError::TooMuchArguments);
-    } else if vals.len() < argnum {
-        return Err(SepDegreeError::TooFewArguments);
-    }
-
-    let (i, j) = if argnum == 2 { (0, 1) } else { (1, 2) };
-
-    // TODO: make these panics into return results
-    let (degree, path) = find_sep_degrees(&client, &network, vals[i], vals[j], 300).await?;
-
-    while !verify_path(&client, &network, path.clone()).await? {
-        find_sep_degrees(&client, &network, vals[i], vals[j], 300).await?;
+    while !verify_path(client, network, path.clone()).await? {
+        find_sep_degrees(client, network, pubkey, other, 300).await?;
     }
 
     Ok((degree, path))

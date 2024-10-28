@@ -3,9 +3,9 @@ use clap::ValueHint;
 #[allow(unused)]
 use clap::{arg, command, value_parser, Arg, ArgAction, Command};
 use network::follow::FollowNetwork;
+use sep_degrees::from_pubkeys;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::Mutex;
 
 mod client_utils;
@@ -48,23 +48,19 @@ async fn main() -> Result<()> {
             Arg::new("print rank")
                 .long("print-rank")
                 .action(ArgAction::SetTrue)
-                .help("Pretty print recommendations rank"),
+                .help("Pretty print recommendations rank, based on --user-key value")
+                .requires("user key"),
         )
         .arg(
             Arg::new("connection key")
                 .long("connection-key")
-                .help("Set connection authentication key")
+                .help("Set connection authentication key. Required unless an nsec is provided otherwise")
                 .required_unless_present_any(["print rank", "run old"]),
         )
         .arg(
             Arg::new("user key")
                 .long("user-key")
                 .help("User Nostr npub or nsec"),
-        )
-        .group(
-            ArgGroup::new("requires key")
-                .arg("print rank")
-                .requires("user key"),
         )
         .arg(
             Arg::new("run old")
@@ -97,7 +93,11 @@ async fn main() -> Result<()> {
     if matches.get_one::<bool>("print rank") == Some(&true) {
         print_rank(
             matches.get_one::<String>("user key").unwrap(),
-            "put the bot nsec here",
+            matches
+                .get_one::<String>("connection key")
+                .map(|x| x.as_str())
+                .or(Some("put the bot nsec here"))
+                .unwrap(),
         )
         .await
         .unwrap();
@@ -186,7 +186,20 @@ async fn main() -> Result<()> {
             &client,
             user,
             config_path,
-            |x, y| sep_degrees::from_message(x, y, 3),
+            |x, y| {
+                let (client, network) = y;
+                let argnum = 3;
+                async move {
+                    let vals = find_pubkeys_in_message(&x.content);
+                    if vals.len() > argnum {
+                        return Err(sep_degrees::SepDegreeError::TooMuchArguments);
+                    } else if vals.len() < argnum {
+                        return Err(sep_degrees::SepDegreeError::TooFewArguments);
+                    }
+                    let (i, j) = (1, 2);
+                    from_pubkeys(vals[i], vals[j], &client, &network).await
+                }
+            },
             (client.clone(), network),
             second_action,
         )
@@ -207,7 +220,7 @@ async fn print_rank(key: &str, nsec: &str) -> Result<()> {
             (ok, pubkey)
         }
         Err(_err) => (
-            Keys::parse(nsec).unwrap(),
+            Keys::parse(nsec).expect("Give a valid nsec with --connection-key argument"),
             PublicKey::parse(key).expect("Key parse error"),
         ),
     };
@@ -258,7 +271,7 @@ async fn print_rank(key: &str, nsec: &str) -> Result<()> {
         }
     }
 
-    println!("{:#.4?}", user_network);
+    //println!("{:#.4?}", user_network);
 
     Ok(())
 }
